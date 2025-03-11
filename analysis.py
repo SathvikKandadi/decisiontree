@@ -2,64 +2,154 @@ import pandas as pd
 import numpy as np
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeRegressor
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.preprocessing import StandardScaler, LabelEncoder
 import shap
 import matplotlib.pyplot as plt
 import seaborn as sns
 import os
+import joblib
+from sklearn.metrics import mean_squared_error, r2_score
 
-# Add this at the top after imports
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 
-def explore_dataset(df):
-    print("\n=== Dataset Exploration ===")
+class StudentPerformancePredictor:
+    def __init__(self):
+        self.model = None
+        self.scaler = StandardScaler()
+        self.label_encoders = {}
+        self.feature_names = None
+        self.explainer = None
+        
+    def train(self, df):
+        # Separate features and target
+        X = df.drop('Overall', axis=1)
+        y = df['Overall']
+        
+        # Save original feature names
+        self.original_features = X.columns.tolist()
+        
+        # Prepare categorical encoders
+        categorical_cols = X.select_dtypes(include=['object']).columns
+        for col in categorical_cols:
+            self.label_encoders[col] = LabelEncoder()
+            X[col] = self.label_encoders[col].fit_transform(X[col])
+        
+        # Scale features
+        X_scaled = self.scaler.fit_transform(X)
+        X_scaled = pd.DataFrame(X_scaled, columns=X.columns)
+        
+        # Train model
+        self.model = DecisionTreeRegressor(random_state=42, max_depth=5)
+        self.model.fit(X_scaled, y)
+        
+        # Initialize SHAP explainer
+        self.explainer = shap.TreeExplainer(self.model)
+        
+        # Save feature names
+        self.feature_names = X.columns
+        
+        return self
     
-    # Basic information
-    print("\nBasic Information:")
-    print(df.info())
+    def predict_student_performance(self, student_data):
+        """
+        Predict performance for a single student and provide detailed analysis
+        """
+        # Convert student data to DataFrame if it's a dictionary
+        if isinstance(student_data, dict):
+            student_data = pd.DataFrame([student_data])
+        
+        # Encode categorical variables
+        student_processed = student_data.copy()
+        for col, encoder in self.label_encoders.items():
+            student_processed[col] = encoder.transform(student_processed[col])
+        
+        # Scale features
+        student_scaled = self.scaler.transform(student_processed)
+        
+        # Make prediction
+        prediction = self.model.predict(student_scaled)[0]
+        
+        # Calculate SHAP values
+        shap_values = self.explainer.shap_values(student_scaled)
+        
+        # Get feature importance for this prediction
+        feature_importance = pd.DataFrame({
+            'feature': self.feature_names,
+            'importance': np.abs(shap_values[0])
+        }).sort_values('importance', ascending=False)
+        
+        # Determine strengths and weaknesses
+        positive_impact = []
+        negative_impact = []
+        
+        for idx, row in feature_importance.head(5).iterrows():
+            feature = row['feature']
+            shap_value = shap_values[0][idx]
+            if shap_value > 0:
+                positive_impact.append((feature, shap_value))
+            else:
+                negative_impact.append((feature, abs(shap_value)))
+        
+        # Generate analysis report
+        analysis = {
+            'predicted_grade': round(prediction, 2),
+            'performance_level': self._get_performance_level(prediction),
+            'strengths': positive_impact,
+            'areas_for_improvement': negative_impact,
+            'feature_importance': feature_importance
+        }
+        
+        return analysis
     
-    # Summary statistics
-    print("\nSummary Statistics:")
-    print(df.describe())
+    def _get_performance_level(self, grade):
+        if grade >= 3.7:
+            return "Excellent"
+        elif grade >= 3.3:
+            return "Very Good"
+        elif grade >= 3.0:
+            return "Good"
+        elif grade >= 2.7:
+            return "Satisfactory"
+        else:
+            return "Needs Improvement"
     
-    # Value distributions for categorical variables
-    print("\nCategorical Variable Distributions:")
-    categorical_cols = df.select_dtypes(include=['object']).columns
-    for col in categorical_cols:
-        print(f"\n{col} distribution:")
-        print(df[col].value_counts(normalize=True).round(3))
+    def save_model(self, path='student_predictor.joblib'):
+        """Save the trained model and preprocessors"""
+        model_data = {
+            'model': self.model,
+            'scaler': self.scaler,
+            'label_encoders': self.label_encoders,
+            'feature_names': self.feature_names,
+            'original_features': self.original_features
+        }
+        joblib.dump(model_data, path)
     
-    # Correlation analysis for numerical variables
-    numerical_cols = df.select_dtypes(include=['float64', 'int64']).columns
-    plt.figure(figsize=(10, 8))
-    sns.heatmap(df[numerical_cols].corr(), annot=True, cmap='coolwarm')
-    plt.title("Correlation Matrix of Numerical Features")
+    @classmethod
+    def load_model(cls, path='student_predictor.joblib'):
+        """Load a trained model"""
+        predictor = cls()
+        model_data = joblib.load(path)
+        predictor.model = model_data['model']
+        predictor.scaler = model_data['scaler']
+        predictor.label_encoders = model_data['label_encoders']
+        predictor.feature_names = model_data['feature_names']
+        predictor.original_features = model_data['original_features']
+        predictor.explainer = shap.TreeExplainer(predictor.model)
+        return predictor
+
+def visualize_prediction(analysis):
+    """Create visualization for the prediction analysis"""
+    plt.switch_backend('Agg')
+    
+    # Feature importance plot
+    plt.figure(figsize=(10, 6))
+    importance_df = analysis['feature_importance'].head(10)
+    sns.barplot(x='importance', y='feature', data=importance_df)
+    plt.title('Top 10 Factors Influencing the Prediction')
     plt.tight_layout()
-    plt.savefig('correlation_matrix.png')
+    plt.savefig('student_analysis.png')
     plt.close()
 
-# Preprocess the data
-def preprocess_data(df):
-    # Separate features and target
-    X = df.drop('Overall', axis=1)
-    y = df['Overall']
-    
-    # Convert categorical variables to numeric using one-hot encoding
-    categorical_cols = X.select_dtypes(include=['object']).columns
-    X = pd.get_dummies(X, columns=categorical_cols)
-    
-    # Split the data
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # Scale the features
-    scaler = StandardScaler()
-    X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled = scaler.transform(X_test)
-    
-    return X_train_scaled, X_test_scaled, y_train, y_test, X.columns
-
-# Train the model
 def train_and_evaluate_model(X_train, X_test, y_train, y_test):
     # Initialize and train the model
     model = DecisionTreeRegressor(random_state=42, max_depth=5)
@@ -79,140 +169,51 @@ def train_and_evaluate_model(X_train, X_test, y_train, y_test):
         'Test Accuracy': 1 - (np.abs(y_test - y_test_pred) / y_test).mean()
     }
     
-    # Visualize predictions vs actual values
-    plt.figure(figsize=(10, 5))
-    
-    # Training set
-    plt.subplot(1, 2, 1)
-    plt.scatter(y_train, y_train_pred, alpha=0.5)
-    plt.plot([y_train.min(), y_train.max()], [y_train.min(), y_train.max()], 'r--', lw=2)
-    plt.xlabel('Actual Values')
-    plt.ylabel('Predicted Values')
-    plt.title('Training Set: Predicted vs Actual')
-    
-    # Test set
-    plt.subplot(1, 2, 2)
-    plt.scatter(y_test, y_test_pred, alpha=0.5)
-    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-    plt.xlabel('Actual Values')
-    plt.ylabel('Predicted Values')
-    plt.title('Test Set: Predicted vs Actual')
-    
-    plt.tight_layout()
-    plt.savefig('prediction_accuracy.png')
-    plt.close()
+    # Save the model and metrics
+    joblib.dump(model, 'trained_model.joblib')
+    joblib.dump(metrics, 'model_metrics.joblib')
     
     return model, metrics, (y_test, y_test_pred)
 
-# Calculate and visualize SHAP values
-def analyze_shap(model, X_train, X_test, feature_names):
-    # Set the backend to avoid potential M1/M2 issues
-    plt.switch_backend('Agg')
-    
-    # Calculate SHAP values
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(X_test)
-    
-    # Summary plot
-    plt.figure(figsize=(12, 8))
-    shap.summary_plot(shap_values, X_test, feature_names=feature_names, show=False)
-    plt.title("SHAP Feature Importance")
-    plt.tight_layout()
-    plt.savefig('shap_summary.png')
-    plt.close()
-    
-    # Feature importance bar plot
-    plt.figure(figsize=(12, 8))
-    shap.summary_plot(shap_values, X_test, feature_names=feature_names, plot_type="bar", show=False)
-    plt.title("SHAP Feature Importance (Bar Plot)")
-    plt.tight_layout()
-    plt.savefig('shap_importance.png')
-    plt.close()
-    
-    # Calculate and return average absolute SHAP values for feature importance
-    feature_importance = pd.DataFrame({
-        'feature': feature_names,
-        'importance': np.abs(shap_values).mean(axis=0)
-    }).sort_values('importance', ascending=False)
-    
-    return feature_importance, explainer, shap_values
-
-# Analyze specific predictions
-def analyze_predictions(model, explainer, X_test, feature_names):
-    # Set the backend to avoid potential M1/M2 issues
-    plt.switch_backend('Agg')
-    
-    # Get SHAP values for a single prediction
-    sample_idx = 0
-    shap_values = explainer.shap_values(X_test[sample_idx:sample_idx+1])
-    
-    # Force plot for single prediction
-    plt.figure(figsize=(15, 3))
-    shap.force_plot(
-        explainer.expected_value,
-        shap_values[0],
-        X_test[sample_idx:sample_idx+1],
-        feature_names=feature_names,
-        matplotlib=True,
-        show=False
-    )
-    plt.title("SHAP Force Plot for Single Prediction")
-    plt.tight_layout()
-    plt.savefig('shap_force_plot.png')
-    plt.close()
-
 def main():
-    # Load data
-    print("Loading and exploring dataset...")
+    # Load and prepare data
+    print("Loading dataset and training model...")
     df = pd.read_csv('dataset.csv')
     
-    # Explore dataset
-    explore_dataset(df)
-    
     # Preprocess data
-    print("\nPreprocessing data...")
-    X_train, X_test, y_train, y_test, feature_names = preprocess_data(df)
+    X = df.drop('Overall', axis=1)
+    y = df['Overall']
+    
+    # Convert categorical variables to numeric
+    categorical_cols = X.select_dtypes(include=['object']).columns
+    X = pd.get_dummies(X, columns=categorical_cols)
+    
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
     # Train and evaluate model
-    print("\nTraining and evaluating model...")
-    model, metrics, (y_test, y_test_pred) = train_and_evaluate_model(X_train, X_test, y_train, y_test)
+    model, metrics, _ = train_and_evaluate_model(X_train, X_test, y_train, y_test)
     
-    # Print model performance metrics
+    # Initialize and train predictor
+    predictor = StudentPerformancePredictor()
+    predictor.train(df)
+    
+    # Save the trained model
+    predictor.save_model()
+    
+    # Print model performance
     print("\n=== Model Performance ===")
-    print("\nAccuracy Metrics:")
     print(f"Training Accuracy: {metrics['Train Accuracy']:.2%}")
     print(f"Testing Accuracy: {metrics['Test Accuracy']:.2%}")
-    
-    print("\nRegression Metrics:")
     print(f"Training RMSE: {metrics['Train RMSE']:.3f}")
     print(f"Testing RMSE: {metrics['Test RMSE']:.3f}")
     print(f"Training R²: {metrics['Train R²']:.3f}")
     print(f"Testing R²: {metrics['Test R²']:.3f}")
     
-    # Calculate and display error distribution
-    errors = np.abs(y_test - y_test_pred)
-    print("\nError Distribution:")
-    print(f"Mean Absolute Error: {errors.mean():.3f}")
-    print(f"Median Absolute Error: {np.median(errors):.3f}")
-    print(f"90th Percentile Error: {np.percentile(errors, 90):.3f}")
+    # Save metrics
+    joblib.dump(metrics, 'model_metrics.joblib')
     
-    # SHAP analysis
-    print("\nPerforming SHAP analysis...")
-    feature_importance, explainer, shap_values = analyze_shap(model, X_train, X_test, feature_names)
-    
-    # Print top 10 most important features
-    print("\n=== Top 10 Most Important Features ===")
-    print(feature_importance.head(10))
-    
-    # Analyze specific predictions
-    analyze_predictions(model, explainer, X_test, feature_names)
-    
-    print("\nAnalysis complete! Generated visualization files:")
-    print("- correlation_matrix.png")
-    print("- prediction_accuracy.png")
-    print("- shap_summary.png")
-    print("- shap_importance.png")
-    print("- shap_force_plot.png")
+    print("\nModel and metrics saved successfully!")
 
 if __name__ == "__main__":
-    main() 
+    main()

@@ -1,2 +1,5 @@
 # Exclude virtual environment folder
 venv/
+model_metrics.joblib
+student_predictor,joblib
+trained_model.joblib
